@@ -1,5 +1,6 @@
 /*
-* Programming Assignment 02: lsv1.4.0
+* Programming Assignment 02: lsv1.5.0
+* Added colorized output based on file type
 * Added alphabetical sorting
 * Added horizontal column display with -x option
 * Added column display (down then across) 
@@ -21,6 +22,15 @@
 
 extern int errno;
 
+// ANSI color codes
+#define COLOR_RESET   "\033[0m"
+#define COLOR_BLUE    "\033[0;34m"
+#define COLOR_GREEN   "\033[0;32m"
+#define COLOR_RED     "\033[0;31m"
+#define COLOR_MAGENTA "\033[0;35m"
+#define COLOR_CYAN    "\033[0;36m"
+#define COLOR_REVERSE "\033[7m"
+
 // Function prototypes
 void do_ls_simple(const char *dir);
 void do_ls_long(const char *dir);
@@ -28,9 +38,11 @@ void do_ls_columns(const char *dir);
 void do_ls_horizontal(const char *dir);
 void print_long_format(const char *dir, const char *filename);
 int get_terminal_width();
-void print_in_columns(char **filenames, int count, int terminal_width);
-void print_horizontal(char **filenames, int count, int terminal_width);
+void print_in_columns(const char *dir, char **filenames, int count, int terminal_width);
+void print_horizontal(const char *dir, char **filenames, int count, int terminal_width);
 int compare_strings(const void *a, const void *b);
+const char *get_color_code(const char *filename, mode_t mode);
+void print_colored_name(const char *filename, mode_t mode);
 
 // Display mode constants
 #define DISPLAY_SIMPLE 0
@@ -80,6 +92,50 @@ int main(int argc, char *argv[])
     return 0;
 }
 
+// Get color code based on file type and permissions
+const char *get_color_code(const char *filename, mode_t mode)
+{
+    // Directories - Blue
+    if (S_ISDIR(mode)) {
+        return COLOR_BLUE;
+    }
+    
+    // Symbolic links - Magenta (Pink)
+    if (S_ISLNK(mode)) {
+        return COLOR_MAGENTA;
+    }
+    
+    // Executable files - Green
+    if (mode & S_IXUSR || mode & S_IXGRP || mode & S_IXOTH) {
+        return COLOR_GREEN;
+    }
+    
+    // Archive files - Red (check by extension)
+    const char *ext = strrchr(filename, '.');
+    if (ext != NULL) {
+        if (strcmp(ext, ".tar") == 0 || strcmp(ext, ".gz") == 0 || 
+            strcmp(ext, ".zip") == 0 || strcmp(ext, ".rar") == 0 ||
+            strcmp(ext, ".7z") == 0 || strcmp(ext, ".bz2") == 0) {
+            return COLOR_RED;
+        }
+    }
+    
+    // Special files (character/block devices, sockets, FIFOs) - Reverse video
+    if (S_ISCHR(mode) || S_ISBLK(mode) || S_ISFIFO(mode) || S_ISSOCK(mode)) {
+        return COLOR_REVERSE;
+    }
+    
+    // Regular files - No color (use reset)
+    return COLOR_RESET;
+}
+
+// Print filename with appropriate color
+void print_colored_name(const char *filename, mode_t mode)
+{
+    const char *color = get_color_code(filename, mode);
+    printf("%s%s%s", color, filename, COLOR_RESET);
+}
+
 // Comparison function for qsort (alphabetical order)
 int compare_strings(const void *a, const void *b)
 {
@@ -98,58 +154,55 @@ int get_terminal_width()
     return w.ws_col;
 }
 
-// Print files in horizontal format (across then down)
-void print_horizontal(char **filenames, int count, int terminal_width)
+// Print files in horizontal format (across then down) - COLORIZED
+
+// Print files in horizontal format (across then down) - COLORIZED
+void print_horizontal(const char *dir, char **filenames, int count, int terminal_width)
 {
     if (count == 0) return;
     
-    // Find the longest filename
-    int max_length = 0;
-    for (int i = 0; i < count; i++) {
-        int len = strlen(filenames[i]);
-        if (len > max_length) {
-            max_length = len;
-        }
-    }
-    
     int current_pos = 0;
+    char fullpath[1024];
     
     for (int i = 0; i < count; i++) {
-        int needed_width = strlen(filenames[i]) + 2;
+        // Construct full path for stat
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, filenames[i]);
         
-        // Check if we need a new line
-        if (current_pos > 0 && current_pos + needed_width > terminal_width) {
-            printf("\n");
-            current_pos = 0;
+        // Get file stats for color determination
+        struct stat statbuf;
+        if (stat(fullpath, &statbuf) == -1) {
+            // If stat fails, just print without color
+            printf("%s", filenames[i]);
+        } else {
+            print_colored_name(filenames[i], statbuf.st_mode);
         }
         
-        // Print the filename with padding
-        printf("%s", filenames[i]);
         current_pos += strlen(filenames[i]);
         
         // Add spacing (except for last file)
         if (i < count - 1) {
-            // Calculate how much space to add
-            int spaces = (max_length + 2) - strlen(filenames[i]);
-            if (current_pos + spaces <= terminal_width) {
-                printf("%*s", spaces, "");
-                current_pos += spaces;
-            } else {
-                // If we can't fit the full spacing, just add minimal space
-                printf(" ");
-                current_pos += 1;
+            printf("  ");
+            current_pos += 2;
+            
+            // Check if we need to wrap
+            if (current_pos > terminal_width) {
+                printf("\n");
+                current_pos = 0;
             }
         }
     }
     printf("\n");
 }
 
-// Print files in column format (down then across)
-void print_in_columns(char **filenames, int count, int terminal_width)
+
+// Print files in column format (down then across) - COLORIZED
+
+// Print files in column format (down then across) - COLORIZED
+void print_in_columns(const char *dir, char **filenames, int count, int terminal_width)
 {
     if (count == 0) return;
     
-    // Find the longest filename
+    // Find the longest filename (for column alignment)
     int max_length = 0;
     for (int i = 0; i < count; i++) {
         int len = strlen(filenames[i]);
@@ -166,17 +219,25 @@ void print_in_columns(char **filenames, int count, int terminal_width)
     
     int rows = (count + columns - 1) / columns;
     
+    char fullpath[1024];
+    
     // Print in "down then across" order
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < columns; col++) {
             int index = row + col * rows;
             if (index < count) {
-                // For all but the last column, print with padding
-                if (col < columns - 1) {
+                // Construct full path for stat
+                snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, filenames[index]);
+                
+                // Get file stats for color
+                struct stat statbuf;
+                if (stat(fullpath, &statbuf) == -1) {
+                    // If stat fails, print without color
                     printf("%-*s", max_length + 2, filenames[index]);
                 } else {
-                    // Last column - no extra padding
-                    printf("%s", filenames[index]);
+                    // Print with color and proper padding
+                    const char *color = get_color_code(filenames[index], statbuf.st_mode);
+                    printf("%s%-*s%s", color, max_length + 2, filenames[index], COLOR_RESET);
                 }
             }
         }
@@ -246,7 +307,7 @@ void do_ls_horizontal(const char *dir)
     
     if (count > 0) {
         int terminal_width = get_terminal_width();
-        print_horizontal(filenames, count, terminal_width);
+        print_horizontal(dir, filenames, count, terminal_width);
     }
     
     free_filenames(filenames, count);
@@ -260,13 +321,13 @@ void do_ls_columns(const char *dir)
     
     if (count > 0) {
         int terminal_width = get_terminal_width();
-        print_in_columns(filenames, count, terminal_width);
+        print_in_columns(dir, filenames, count, terminal_width);
     }
     
     free_filenames(filenames, count);
 }
 
-// Long listing function (needs to be updated for sorting)
+// Long listing function (COLORIZED)
 void do_ls_long(const char *dir)
 {
     struct dirent *entry;
@@ -306,7 +367,7 @@ void do_ls_long(const char *dir)
         qsort(filenames, count, sizeof(char *), compare_strings);
     }
     
-    // Print in long format (sorted)
+    // Print in long format (sorted and colorized)
     for (int i = 0; i < count; i++) {
         print_long_format(dir, filenames[i]);
         free(filenames[i]);
@@ -314,6 +375,7 @@ void do_ls_long(const char *dir)
     free(filenames);
 }
 
+// Updated long format printing with colors
 void print_long_format(const char *dir, const char *filename)
 {
     struct stat statbuf;
@@ -358,13 +420,16 @@ void print_long_format(const char *dir, const char *filename)
     timeinfo = localtime(&statbuf.st_mtime);
     strftime(timebuf, sizeof(timebuf), "%b %d %H:%M", timeinfo);
     
-    // Print long format
-    printf("%s %2ld %-8s %-8s %8ld %s %s\n",
+    // Print long format (metadata without color)
+    printf("%s %2ld %-8s %-8s %8ld %s ",
            modestr,
            statbuf.st_nlink,
            pwd ? pwd->pw_name : "unknown",
            grp ? grp->gr_name : "unknown",
            statbuf.st_size,
-           timebuf,
-           filename);
+           timebuf);
+    
+    // Print filename WITH COLOR
+    print_colored_name(filename, statbuf.st_mode);
+    printf("\n");
 }
