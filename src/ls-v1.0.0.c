@@ -1,6 +1,8 @@
 /*
-* Programming Assignment 02: lsv1.2.0
-* Added column display (down then across)
+* Programming Assignment 02: lsv1.4.0
+* Added alphabetical sorting
+* Added horizontal column display with -x option
+* Added column display (down then across) 
 * Added -l option for long listing format
 */
 #define _DEFAULT_SOURCE
@@ -23,33 +25,67 @@ extern int errno;
 void do_ls_simple(const char *dir);
 void do_ls_long(const char *dir);
 void do_ls_columns(const char *dir);
+void do_ls_horizontal(const char *dir);
 void print_long_format(const char *dir, const char *filename);
 int get_terminal_width();
 void print_in_columns(char **filenames, int count, int terminal_width);
+void print_horizontal(char **filenames, int count, int terminal_width);
+int compare_strings(const void *a, const void *b);
+
+// Display mode constants
+#define DISPLAY_SIMPLE 0
+#define DISPLAY_LONG   1
+#define DISPLAY_COLUMN 2
+#define DISPLAY_HORIZONTAL 3
 
 int main(int argc, char *argv[])
 {
-    int long_listing = 0;
+    int display_mode = DISPLAY_COLUMN;  // Default: column display
     
-    // Simple argument parsing
-    if (argc > 1 && strcmp(argv[1], "-l") == 0) {
-        long_listing = 1;
+    // Parse command line options
+    int opt;
+    while ((opt = getopt(argc, argv, "lx")) != -1) {
+        switch (opt) {
+            case 'l':
+                display_mode = DISPLAY_LONG;
+                break;
+            case 'x':
+                display_mode = DISPLAY_HORIZONTAL;
+                break;
+            default:
+                fprintf(stderr, "Usage: %s [-l] [-x] [directory...]\n", argv[0]);
+                exit(EXIT_FAILURE);
+        }
     }
     
     const char *dir = ".";
-    if (long_listing && argc > 2) {
-        dir = argv[2];
-    } else if (!long_listing && argc > 1) {
-        dir = argv[1];
+    if (optind < argc) {
+        dir = argv[optind];
     }
     
-    if (long_listing) {
-        do_ls_long(dir);
-    } else {
-        do_ls_columns(dir);  // Changed from do_ls_simple to do_ls_columns
+    // Call appropriate display function based on mode
+    switch (display_mode) {
+        case DISPLAY_LONG:
+            do_ls_long(dir);
+            break;
+        case DISPLAY_HORIZONTAL:
+            do_ls_horizontal(dir);
+            break;
+        case DISPLAY_COLUMN:
+        default:
+            do_ls_columns(dir);
+            break;
     }
     
     return 0;
+}
+
+// Comparison function for qsort (alphabetical order)
+int compare_strings(const void *a, const void *b)
+{
+    const char *str1 = *(const char **)a;
+    const char *str2 = *(const char **)b;
+    return strcmp(str1, str2);
 }
 
 // Get terminal width using ioctl
@@ -60,6 +96,52 @@ int get_terminal_width()
         return 80;  // Fallback to 80 columns if ioctl fails
     }
     return w.ws_col;
+}
+
+// Print files in horizontal format (across then down)
+void print_horizontal(char **filenames, int count, int terminal_width)
+{
+    if (count == 0) return;
+    
+    // Find the longest filename
+    int max_length = 0;
+    for (int i = 0; i < count; i++) {
+        int len = strlen(filenames[i]);
+        if (len > max_length) {
+            max_length = len;
+        }
+    }
+    
+    int current_pos = 0;
+    
+    for (int i = 0; i < count; i++) {
+        int needed_width = strlen(filenames[i]) + 2;
+        
+        // Check if we need a new line
+        if (current_pos > 0 && current_pos + needed_width > terminal_width) {
+            printf("\n");
+            current_pos = 0;
+        }
+        
+        // Print the filename with padding
+        printf("%s", filenames[i]);
+        current_pos += strlen(filenames[i]);
+        
+        // Add spacing (except for last file)
+        if (i < count - 1) {
+            // Calculate how much space to add
+            int spaces = (max_length + 2) - strlen(filenames[i]);
+            if (current_pos + spaces <= terminal_width) {
+                printf("%*s", spaces, "");
+                current_pos += spaces;
+            } else {
+                // If we can't fit the full spacing, just add minimal space
+                printf(" ");
+                current_pos += 1;
+            }
+        }
+    }
+    printf("\n");
 }
 
 // Print files in column format (down then across)
@@ -77,12 +159,12 @@ void print_in_columns(char **filenames, int count, int terminal_width)
     }
     
     // Calculate column layout
-    int column_width = max_length + 2;  // Add 2 spaces between columns
+    int column_width = max_length + 2;
     int columns = terminal_width / column_width;
-    if (columns == 0) columns = 1;  // At least 1 column
+    if (columns == 0) columns = 1;
     if (columns > count) columns = count;
-	    
-    int rows = (count + columns - 1) / columns;  // Ceiling division
+    
+    int rows = (count + columns - 1) / columns;
     
     // Print in "down then across" order
     for (int row = 0; row < rows; row++) {
@@ -102,17 +184,16 @@ void print_in_columns(char **filenames, int count, int terminal_width)
     }
 }
 
-// New column display function
-void do_ls_columns(const char *dir)
+// Common function to read directory entries and sort them
+int read_directory_entries(const char *dir, char ***filenames_ptr)
 {
     struct dirent *entry;
     DIR *dp = opendir(dir);
     if (dp == NULL) {
         fprintf(stderr, "Cannot open directory: %s\n", dir);
-        return;
+        return 0;
     }
     
-    // First pass: count files and get names
     int count = 0;
     int capacity = 100;
     char **filenames = malloc(capacity * sizeof(char *));
@@ -139,18 +220,53 @@ void do_ls_columns(const char *dir)
     }
     closedir(dp);
     
-    // Get terminal width and print in columns
-    int terminal_width = get_terminal_width();
-    print_in_columns(filenames, count, terminal_width);
+    // SORT THE FILENAMES ALPHABETICALLY
+    if (count > 0) {
+        qsort(filenames, count, sizeof(char *), compare_strings);
+    }
     
-    // Free allocated memory
+    *filenames_ptr = filenames;
+    return count;
+}
+
+// Free allocated filenames array
+void free_filenames(char **filenames, int count)
+{
     for (int i = 0; i < count; i++) {
         free(filenames[i]);
     }
     free(filenames);
 }
 
-// Keep the existing long listing functions (unchanged)
+// Horizontal display function
+void do_ls_horizontal(const char *dir)
+{
+    char **filenames;
+    int count = read_directory_entries(dir, &filenames);
+    
+    if (count > 0) {
+        int terminal_width = get_terminal_width();
+        print_horizontal(filenames, count, terminal_width);
+    }
+    
+    free_filenames(filenames, count);
+}
+
+// Column display function
+void do_ls_columns(const char *dir)
+{
+    char **filenames;
+    int count = read_directory_entries(dir, &filenames);
+    
+    if (count > 0) {
+        int terminal_width = get_terminal_width();
+        print_in_columns(filenames, count, terminal_width);
+    }
+    
+    free_filenames(filenames, count);
+}
+
+// Long listing function (needs to be updated for sorting)
 void do_ls_long(const char *dir)
 {
     struct dirent *entry;
@@ -160,17 +276,42 @@ void do_ls_long(const char *dir)
         return;
     }
     
+    // First, read all entries and sort them
+    int count = 0;
+    int capacity = 100;
+    char **filenames = malloc(capacity * sizeof(char *));
+    
     errno = 0;
     while ((entry = readdir(dp)) != NULL) {
         if (entry->d_name[0] == '.')
             continue;
-        print_long_format(dir, entry->d_name);
+        
+        if (count >= capacity) {
+            capacity *= 2;
+            filenames = realloc(filenames, capacity * sizeof(char *));
+        }
+        
+        filenames[count] = malloc(strlen(entry->d_name) + 1);
+        strcpy(filenames[count], entry->d_name);
+        count++;
     }
-
+    
     if (errno != 0) {
         perror("readdir failed");
     }
     closedir(dp);
+    
+    // SORT THE FILENAMES for long listing too
+    if (count > 0) {
+        qsort(filenames, count, sizeof(char *), compare_strings);
+    }
+    
+    // Print in long format (sorted)
+    for (int i = 0; i < count; i++) {
+        print_long_format(dir, filenames[i]);
+        free(filenames[i]);
+    }
+    free(filenames);
 }
 
 void print_long_format(const char *dir, const char *filename)
