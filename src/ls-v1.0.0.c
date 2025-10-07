@@ -1,5 +1,6 @@
 /*
-* Programming Assignment 02: lsv1.5.0
+* Programming Assignment 02: lsv1.6.0
+* Added recursive listing with -R option
 * Added colorized output based on file type
 * Added alphabetical sorting
 * Added horizontal column display with -x option
@@ -32,10 +33,10 @@ extern int errno;
 #define COLOR_REVERSE "\033[7m"
 
 // Function prototypes
-void do_ls_simple(const char *dir);
-void do_ls_long(const char *dir);
-void do_ls_columns(const char *dir);
-void do_ls_horizontal(const char *dir);
+void do_ls(const char *dir, int display_mode, int recursive, int is_first);
+void do_ls_long(const char *dir, int recursive, int is_first);
+void do_ls_columns(const char *dir, int recursive, int is_first);
+void do_ls_horizontal(const char *dir, int recursive, int is_first);
 void print_long_format(const char *dir, const char *filename);
 int get_terminal_width();
 void print_in_columns(const char *dir, char **filenames, int count, int terminal_width);
@@ -43,6 +44,8 @@ void print_horizontal(const char *dir, char **filenames, int count, int terminal
 int compare_strings(const void *a, const void *b);
 const char *get_color_code(const char *filename, mode_t mode);
 void print_colored_name(const char *filename, mode_t mode);
+int read_directory_entries(const char *dir, char ***filenames_ptr, int include_dots);
+void free_filenames(char **filenames, int count);
 
 // Display mode constants
 #define DISPLAY_SIMPLE 0
@@ -53,10 +56,11 @@ void print_colored_name(const char *filename, mode_t mode);
 int main(int argc, char *argv[])
 {
     int display_mode = DISPLAY_COLUMN;  // Default: column display
+    int recursive = 0;                  // -R flag
     
     // Parse command line options
     int opt;
-    while ((opt = getopt(argc, argv, "lx")) != -1) {
+    while ((opt = getopt(argc, argv, "lxR")) != -1) {
         switch (opt) {
             case 'l':
                 display_mode = DISPLAY_LONG;
@@ -64,32 +68,55 @@ int main(int argc, char *argv[])
             case 'x':
                 display_mode = DISPLAY_HORIZONTAL;
                 break;
+            case 'R':
+                recursive = 1;
+                break;
             default:
-                fprintf(stderr, "Usage: %s [-l] [-x] [directory...]\n", argv[0]);
+                fprintf(stderr, "Usage: %s [-l] [-x] [-R] [directory...]\n", argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
     
-    const char *dir = ".";
-    if (optind < argc) {
-        dir = argv[optind];
+    // If no directories specified, use current directory
+    if (optind >= argc) {
+        do_ls(".", display_mode, recursive, 1);
+    } else {
+        // Process each directory
+        for (int i = optind; i < argc; i++) {
+            if (argc - optind > 1) {
+                printf("%s:\n", argv[i]);
+            }
+            do_ls(argv[i], display_mode, recursive, 1);
+            if (argc - optind > 1 && i < argc - 1) {
+                printf("\n");
+            }
+        }
+    }
+    
+    return 0;
+}
+
+// Main directory listing function (now supports recursion)
+void do_ls(const char *dir, int display_mode, int recursive, int is_first)
+{
+    // Print directory header (for recursive mode or multiple directories)
+    if (!is_first || recursive) {
+        printf("\n%s:\n", dir);
     }
     
     // Call appropriate display function based on mode
     switch (display_mode) {
         case DISPLAY_LONG:
-            do_ls_long(dir);
+            do_ls_long(dir, recursive, is_first);
             break;
         case DISPLAY_HORIZONTAL:
-            do_ls_horizontal(dir);
+            do_ls_horizontal(dir, recursive, is_first);
             break;
         case DISPLAY_COLUMN:
         default:
-            do_ls_columns(dir);
+            do_ls_columns(dir, recursive, is_first);
             break;
     }
-    
-    return 0;
 }
 
 // Get color code based on file type and permissions
@@ -155,8 +182,6 @@ int get_terminal_width()
 }
 
 // Print files in horizontal format (across then down) - COLORIZED
-
-// Print files in horizontal format (across then down) - COLORIZED
 void print_horizontal(const char *dir, char **filenames, int count, int terminal_width)
 {
     if (count == 0) return;
@@ -165,12 +190,16 @@ void print_horizontal(const char *dir, char **filenames, int count, int terminal
     char fullpath[1024];
     
     for (int i = 0; i < count; i++) {
-        // Construct full path for stat
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, filenames[i]);
+        // Construct full path for stat - handle root directory case
+        if (strcmp(dir, "/") == 0) {
+            snprintf(fullpath, sizeof(fullpath), "/%s", filenames[i]);
+        } else {
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, filenames[i]);
+        }
         
         // Get file stats for color determination
         struct stat statbuf;
-        if (stat(fullpath, &statbuf) == -1) {
+        if (lstat(fullpath, &statbuf) == -1) {
             // If stat fails, just print without color
             printf("%s", filenames[i]);
         } else {
@@ -185,7 +214,7 @@ void print_horizontal(const char *dir, char **filenames, int count, int terminal
             current_pos += 2;
             
             // Check if we need to wrap
-            if (current_pos > terminal_width) {
+            if (current_pos + strlen(filenames[i+1]) > terminal_width) {
                 printf("\n");
                 current_pos = 0;
             }
@@ -193,9 +222,6 @@ void print_horizontal(const char *dir, char **filenames, int count, int terminal
     }
     printf("\n");
 }
-
-
-// Print files in column format (down then across) - COLORIZED
 
 // Print files in column format (down then across) - COLORIZED
 void print_in_columns(const char *dir, char **filenames, int count, int terminal_width)
@@ -226,12 +252,16 @@ void print_in_columns(const char *dir, char **filenames, int count, int terminal
         for (int col = 0; col < columns; col++) {
             int index = row + col * rows;
             if (index < count) {
-                // Construct full path for stat
-                snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, filenames[index]);
+                // Construct full path for stat - handle root directory case
+                if (strcmp(dir, "/") == 0) {
+                    snprintf(fullpath, sizeof(fullpath), "/%s", filenames[index]);
+                } else {
+                    snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, filenames[index]);
+                }
                 
-                // Get file stats for color
+                // Get file stats for color - use lstat to handle symlinks correctly
                 struct stat statbuf;
-                if (stat(fullpath, &statbuf) == -1) {
+                if (lstat(fullpath, &statbuf) == -1) {
                     // If stat fails, print without color
                     printf("%-*s", max_length + 2, filenames[index]);
                 } else {
@@ -246,7 +276,7 @@ void print_in_columns(const char *dir, char **filenames, int count, int terminal
 }
 
 // Common function to read directory entries and sort them
-int read_directory_entries(const char *dir, char ***filenames_ptr)
+int read_directory_entries(const char *dir, char ***filenames_ptr, int include_dots)
 {
     struct dirent *entry;
     DIR *dp = opendir(dir);
@@ -261,7 +291,7 @@ int read_directory_entries(const char *dir, char ***filenames_ptr)
     
     errno = 0;
     while ((entry = readdir(dp)) != NULL) {
-        if (entry->d_name[0] == '.')
+        if (!include_dots && entry->d_name[0] == '.')
             continue;
         
         // Resize array if needed
@@ -299,80 +329,124 @@ void free_filenames(char **filenames, int count)
     free(filenames);
 }
 
-// Horizontal display function
-void do_ls_horizontal(const char *dir)
+// Horizontal display function with recursion support
+void do_ls_horizontal(const char *dir, int recursive, int is_first)
 {
     char **filenames;
-    int count = read_directory_entries(dir, &filenames);
+    int count = read_directory_entries(dir, &filenames, 0);  // Don't include dot files
     
     if (count > 0) {
         int terminal_width = get_terminal_width();
         print_horizontal(dir, filenames, count, terminal_width);
     }
     
+    // RECURSIVE PART: Process subdirectories
+    if (recursive) {
+        char **all_filenames;
+        int all_count = read_directory_entries(dir, &all_filenames, 1);  // Include dot files to find all directories
+        
+        for (int i = 0; i < all_count; i++) {
+            char fullpath[1024];
+            if (strcmp(dir, "/") == 0) {
+                snprintf(fullpath, sizeof(fullpath), "/%s", all_filenames[i]);
+            } else {
+                snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, all_filenames[i]);
+            }
+            
+            // Check if it's a directory (and not . or ..)
+            struct stat statbuf;
+            if (lstat(fullpath, &statbuf) == 0 && S_ISDIR(statbuf.st_mode)) {
+                if (strcmp(all_filenames[i], ".") != 0 && strcmp(all_filenames[i], "..") != 0) {
+                    // Recursive call for subdirectory
+                    do_ls(fullpath, DISPLAY_HORIZONTAL, recursive, 0);
+                }
+            }
+            free(all_filenames[i]);
+        }
+        free(all_filenames);
+    }
+    
     free_filenames(filenames, count);
 }
 
-// Column display function
-void do_ls_columns(const char *dir)
+// Column display function with recursion support
+void do_ls_columns(const char *dir, int recursive, int is_first)
 {
     char **filenames;
-    int count = read_directory_entries(dir, &filenames);
+    int count = read_directory_entries(dir, &filenames, 0);  // Don't include dot files
     
     if (count > 0) {
         int terminal_width = get_terminal_width();
         print_in_columns(dir, filenames, count, terminal_width);
     }
     
+    // RECURSIVE PART: Process subdirectories
+    if (recursive) {
+        char **all_filenames;
+        int all_count = read_directory_entries(dir, &all_filenames, 1);  // Include dot files to find all directories
+        
+        for (int i = 0; i < all_count; i++) {
+            char fullpath[1024];
+            if (strcmp(dir, "/") == 0) {
+                snprintf(fullpath, sizeof(fullpath), "/%s", all_filenames[i]);
+            } else {
+                snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, all_filenames[i]);
+            }
+            
+            // Check if it's a directory (and not . or ..)
+            struct stat statbuf;
+            if (lstat(fullpath, &statbuf) == 0 && S_ISDIR(statbuf.st_mode)) {
+                if (strcmp(all_filenames[i], ".") != 0 && strcmp(all_filenames[i], "..") != 0) {
+                    // Recursive call for subdirectory
+                    do_ls(fullpath, DISPLAY_COLUMN, recursive, 0);
+                }
+            }
+            free(all_filenames[i]);
+        }
+        free(all_filenames);
+    }
+    
     free_filenames(filenames, count);
 }
 
-// Long listing function (COLORIZED)
-void do_ls_long(const char *dir)
+// Long listing function with recursion support
+void do_ls_long(const char *dir, int recursive, int is_first)
 {
-    struct dirent *entry;
-    DIR *dp = opendir(dir);
-    if (dp == NULL) {
-        fprintf(stderr, "Cannot open directory: %s\n", dir);
-        return;
-    }
+    char **filenames;
+    int count = read_directory_entries(dir, &filenames, 0);  // Don't include dot files
     
-    // First, read all entries and sort them
-    int count = 0;
-    int capacity = 100;
-    char **filenames = malloc(capacity * sizeof(char *));
-    
-    errno = 0;
-    while ((entry = readdir(dp)) != NULL) {
-        if (entry->d_name[0] == '.')
-            continue;
-        
-        if (count >= capacity) {
-            capacity *= 2;
-            filenames = realloc(filenames, capacity * sizeof(char *));
-        }
-        
-        filenames[count] = malloc(strlen(entry->d_name) + 1);
-        strcpy(filenames[count], entry->d_name);
-        count++;
-    }
-    
-    if (errno != 0) {
-        perror("readdir failed");
-    }
-    closedir(dp);
-    
-    // SORT THE FILENAMES for long listing too
-    if (count > 0) {
-        qsort(filenames, count, sizeof(char *), compare_strings);
-    }
-    
-    // Print in long format (sorted and colorized)
+    // Print in long format (sorted)
     for (int i = 0; i < count; i++) {
         print_long_format(dir, filenames[i]);
         free(filenames[i]);
     }
     free(filenames);
+    
+    // RECURSIVE PART: Process subdirectories
+    if (recursive) {
+        char **all_filenames;
+        int all_count = read_directory_entries(dir, &all_filenames, 1);  // Include dot files to find all directories
+        
+        for (int i = 0; i < all_count; i++) {
+            char fullpath[1024];
+            if (strcmp(dir, "/") == 0) {
+                snprintf(fullpath, sizeof(fullpath), "/%s", all_filenames[i]);
+            } else {
+                snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, all_filenames[i]);
+            }
+            
+            // Check if it's a directory (and not . or ..)
+            struct stat statbuf;
+            if (lstat(fullpath, &statbuf) == 0 && S_ISDIR(statbuf.st_mode)) {
+                if (strcmp(all_filenames[i], ".") != 0 && strcmp(all_filenames[i], "..") != 0) {
+                    // Recursive call for subdirectory
+                    do_ls(fullpath, DISPLAY_LONG, recursive, 0);
+                }
+            }
+            free(all_filenames[i]);
+        }
+        free(all_filenames);
+    }
 }
 
 // Updated long format printing with colors
@@ -388,8 +462,8 @@ void print_long_format(const char *dir, const char *filename)
     snprintf(path, sizeof(path), "%s/%s", dir, filename);
     
     // Get file status
-    if (stat(path, &statbuf) == -1) {
-        perror("stat failed");
+    if (lstat(path, &statbuf) == -1) {
+        perror("lstat failed");
         return;
     }
     
@@ -431,5 +505,15 @@ void print_long_format(const char *dir, const char *filename)
     
     // Print filename WITH COLOR
     print_colored_name(filename, statbuf.st_mode);
+    
+    // If it's a symbolic link, show where it points
+    if (S_ISLNK(statbuf.st_mode)) {
+        char linkbuf[1024];
+        ssize_t len = readlink(path, linkbuf, sizeof(linkbuf) - 1);
+        if (len != -1) {
+            linkbuf[len] = '\0';
+            printf(" -> %s", linkbuf);
+        }
+    }
     printf("\n");
 }
